@@ -105,3 +105,80 @@ func TestParseStartupHeaderTooShort(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+/*
+	Same serve/Dial pattern as TestServeAcceptsConnection:
+
+Write 8 bytes: length 8, sslRequestCode.
+io.ReadFull(conn, buf[:1]) — must be 'N'.
+Write 8 bytes: length 8, 196608.
+cancel() and wait on serve.
+*/
+func TestParseSSLRequest(t *testing.T) {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint32(b[0:4], 8)
+	binary.BigEndian.PutUint32(b[4:8], sslRequestCode)
+
+	length, version, err := parseStartupHeader(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if length != 8 || version != sslRequestCode {
+		t.Fatalf("length=%d version=%d", length, version)
+	}
+}
+
+func TestServeRefusesSSLThenReadsStartup(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- serve(ctx, testLogger(), ln)
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	ssl := make([]byte, 8)
+	binary.BigEndian.PutUint32(ssl[0:4], 8)
+	binary.BigEndian.PutUint32(ssl[4:8], sslRequestCode)
+	if _, err := conn.Write(ssl); err != nil {
+		t.Fatalf("write ssl: %v", err)
+	}
+
+	var reply [1]byte
+	if _, err := io.ReadFull(conn, reply[:]); err != nil {
+		t.Fatalf("read N: %v", err)
+	}
+	if reply[0] != 'N' {
+		t.Fatalf("ssl reply = %q, want N", reply[0])
+	}
+
+	startup := make([]byte, 8)
+	binary.BigEndian.PutUint32(startup[0:4], 8)
+	binary.BigEndian.PutUint32(startup[4:8], 196608)
+	if _, err := conn.Write(startup); err != nil {
+		t.Fatalf("write startup: %v", err)
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve() error = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("serve did not return after cancel")
+	}
+}

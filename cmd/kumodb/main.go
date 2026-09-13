@@ -15,6 +15,8 @@ import (
 	"time"
 )
 
+const sslRequestCode = 80877103 // postgres SSLRequest
+
 func main() {
 
 	addr := flag.String("addr", "127.0.0.1:15432", "the address to listen on")
@@ -81,16 +83,31 @@ func handleConn(ctx context.Context, log *slog.Logger, conn net.Conn) {
 
 	log.Info("accepted", "remote", conn.RemoteAddr().String())
 
-	const headerLen = 8
-	header := make([]byte, headerLen)
-	if _, err := io.ReadFull(conn, header); err != nil {
+	length, version, err := readStartupHeader(conn)
+	if err != nil {
 		log.Error("failed to read startup header", "error", err)
 		return
 	}
-	length, version, err := parseStartupHeader(header)
-	if err != nil {
-		log.Error("invalid startup header", "error", err)
-		return
+
+	if version == sslRequestCode && length == 8 {
+		if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			log.Error("failed to set write deadline", "error", err)
+			return
+		}
+
+		if _, err := conn.Write([]byte{'N'}); err != nil {
+			log.Error("failed to refuse SSL", "error", err)
+			return
+		}
+		if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			log.Error("read deadline", "error", err)
+			return
+		}
+		length, version, err = readStartupHeader(conn)
+		if err != nil {
+			log.Error("failed to read startup header", "error", err)
+			return
+		}
 	}
 
 	log.Info("startup header", "length", length, "version", version)
@@ -104,5 +121,18 @@ func parseStartupHeader(b []byte) (length, version uint32, err error) {
 	}
 	length = binary.BigEndian.Uint32(b[0:4])
 	version = binary.BigEndian.Uint32(b[4:8])
+	return length, version, nil
+}
+
+func readStartupHeader(conn net.Conn) (length, version uint32, err error) {
+	const headerLen = 8
+	header := make([]byte, headerLen)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return 0, 0, err
+	}
+	length, version, err = parseStartupHeader(header)
+	if err != nil {
+		return 0, 0, err
+	}
 	return length, version, nil
 }
