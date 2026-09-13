@@ -212,3 +212,32 @@ func TestRemainingStartupSizeTooLarge(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestParseStartupParams(t *testing.T) {
+	body := []byte("user\x00avik\x00database\x00kumodb\x00\x00")
+	got, err := parseStartupParams(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["user"] != "avik" || got["database"] != "kumodb" {
+		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestParseStartupParamsEmpty(t *testing.T) {
+	got, err := parseStartupParams(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestParseStartupParamsMissingTerminator(t *testing.T) {
+	body := []byte("user\x00avik\x00") // no final extra \0 after a complete pair...
+	// actually user\0avik\0 is: key, value, then rest empty → missing terminator
+	if _, err := parseStartupParams(body); err == nil {
+		t.Fatal("expected error")
+	}
+}

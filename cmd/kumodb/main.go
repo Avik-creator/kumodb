@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"flag"
@@ -18,6 +19,41 @@ import (
 const sslRequestCode = 80877103 // postgres SSLRequest
 
 const maxStartupLen = 10_000
+
+// parseStartupParams parses the startup parameters from the startup body. It returns a map of key-value pairs. The body is the startup body as read from the client. The body is terminated by a 0 byte.
+func parseStartupParams(body []byte) (map[string]string, error) {
+	if len(body) == 0 {
+		return make(map[string]string), nil
+	}
+	out := make(map[string]string)
+	rest := body
+	for {
+		if len(rest) == 0 {
+			return nil, fmt.Errorf("startup params: missing terminator")
+		}
+		if rest[0] == 0 {
+			if len(rest) != 1 {
+				return nil, fmt.Errorf("startup params: trailing garbage")
+			}
+			return out, nil
+		}
+		kEnd := bytes.IndexByte(rest, 0)
+		if kEnd < 0 {
+			return nil, fmt.Errorf("startup params: unterminated key")
+		}
+		key := string(rest[:kEnd])
+		rest = rest[kEnd+1:]
+
+		vEnd := bytes.IndexByte(rest, 0)
+		if vEnd < 0 {
+			return nil, fmt.Errorf("startup params: unterminated value")
+		}
+		val := string(rest[:vEnd])
+		rest = rest[vEnd+1:]
+
+		out[key] = val
+	}
+}
 
 func remainingStartupSize(length uint32) (int, error) {
 	if length < 8 {
@@ -120,6 +156,7 @@ func handleConn(ctx context.Context, log *slog.Logger, conn net.Conn) {
 			log.Error("failed to read startup header", "error", err)
 			return
 		}
+
 	}
 
 	remaining, err := remainingStartupSize(length)
@@ -133,8 +170,16 @@ func handleConn(ctx context.Context, log *slog.Logger, conn net.Conn) {
 			log.Error("failed to read startup bytes", "error", err)
 			return
 		}
-		log.Info("startup bytes", "bytes", string(body[:remaining]))
+		log.Info("startup bytes", "bytes", int(remaining))
+
+		params, err := parseStartupParams(body)
+		if err != nil {
+			log.Error("failed to parse startup params", "error", err)
+			return
+		}
+		log.Info("startup params", "user", params["user"], "database", params["database"])
 	}
+
 	log.Info("closed", "remote", conn.RemoteAddr().String())
 }
 
