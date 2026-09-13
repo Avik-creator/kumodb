@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"io"
 	"log/slog"
 	"net"
@@ -84,47 +85,23 @@ func TestServeAcceptsConnection(t *testing.T) {
 	}
 }
 
-func TestServeEchoes(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+func TestParseStartupHeader(t *testing.T) {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint32(b[0:4], 8)
+	binary.BigEndian.PutUint32(b[4:8], 196608)
+
+	length, version, err := parseStartupHeader(b)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	done := make(chan error, 1)
-	go func() {
-		done <- serve(ctx, testLogger(), ln)
-	}()
-
-	conn, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
+	if length != 8 || version != 196608 {
+		t.Fatalf("length=%d version=%d", length, version)
 	}
-	defer conn.Close()
+}
 
-	want := []byte("ping\n")
-	if _, err := conn.Write(want); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	got := make([]byte, len(want))
-	if _, err := io.ReadFull(conn, got); err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if string(got) != string(want) {
-		t.Fatalf("got %q, want %q", got, want)
-	}
-
-	cancel()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("serve() error = %v, want nil", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("serve did not return after cancel")
+func TestParseStartupHeaderTooShort(t *testing.T) {
+	_, _, err := parseStartupHeader([]byte{1, 2, 3})
+	if err == nil {
+		t.Fatal("expected error")
 	}
 }

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"flag"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -10,6 +12,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 )
 
 func main() {
@@ -70,12 +73,36 @@ func handleConn(ctx context.Context, log *slog.Logger, conn net.Conn) {
 	defer cancel()
 	defer conn.Close()
 
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	go func() {
 		<-ctx.Done()
 		conn.Close()
 	}()
 
 	log.Info("accepted", "remote", conn.RemoteAddr().String())
-	_, _ = io.Copy(conn, conn)
+
+	const headerLen = 8
+	header := make([]byte, headerLen)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		log.Error("failed to read startup header", "error", err)
+		return
+	}
+	length, version, err := parseStartupHeader(header)
+	if err != nil {
+		log.Error("invalid startup header", "error", err)
+		return
+	}
+
+	log.Info("startup header", "length", length, "version", version)
+
 	log.Info("closed", "remote", conn.RemoteAddr().String())
+}
+
+func parseStartupHeader(b []byte) (length, version uint32, err error) {
+	if len(b) < 8 {
+		return 0, 0, fmt.Errorf("startup header too short: %d", len(b))
+	}
+	length = binary.BigEndian.Uint32(b[0:4])
+	version = binary.BigEndian.Uint32(b[4:8])
+	return length, version, nil
 }
