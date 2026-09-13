@@ -17,6 +17,18 @@ import (
 
 const sslRequestCode = 80877103 // postgres SSLRequest
 
+const maxStartupLen = 10_000
+
+func remainingStartupSize(length uint32) (int, error) {
+	if length < 8 {
+		return 0, fmt.Errorf("startup length %d is too small", length)
+	}
+	if length > maxStartupLen {
+		return 0, fmt.Errorf("startup length %d is too large", length)
+	}
+	return int(length) - 8, nil
+}
+
 func main() {
 
 	addr := flag.String("addr", "127.0.0.1:15432", "the address to listen on")
@@ -110,8 +122,19 @@ func handleConn(ctx context.Context, log *slog.Logger, conn net.Conn) {
 		}
 	}
 
-	log.Info("startup header", "length", length, "version", version)
-
+	remaining, err := remainingStartupSize(length)
+	if err != nil {
+		log.Error("failed to get remaining startup size", "error", err)
+		return
+	}
+	body := make([]byte, remaining)
+	if remaining > 0 {
+		if _, err := io.ReadFull(conn, body); err != nil {
+			log.Error("failed to read startup bytes", "error", err)
+			return
+		}
+		log.Info("startup bytes", "bytes", string(body))
+	}
 	log.Info("closed", "remote", conn.RemoteAddr().String())
 }
 

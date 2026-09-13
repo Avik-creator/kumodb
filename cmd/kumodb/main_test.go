@@ -182,3 +182,33 @@ func TestServeRefusesSSLThenReadsStartup(t *testing.T) {
 		t.Fatal("serve did not return after cancel")
 	}
 }
+
+func TestRemainingStartupSize(t *testing.T) {
+	n, err := remainingStartupSize(16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 8 {
+		t.Fatalf("n=%d, want 8", n)
+	}
+
+	n, err = remainingStartupSize(8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("n=%d, want 0", n)
+	}
+}
+
+func TestRemainingStartupSizeTooSmall(t *testing.T) {
+	if _, err := remainingStartupSize(1); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestRemainingStartupSizeTooLarge(t *testing.T) {
+	if _, err := remainingStartupSize(100_000_000); err == nil {
+		t.Fatal("expected error")
+	}
+}
