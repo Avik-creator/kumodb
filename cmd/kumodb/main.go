@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -73,6 +74,58 @@ func remainingStartupSize(length uint32) (int, error) {
 		return 0, fmt.Errorf("startup length %d is too large", length)
 	}
 	return int(length) - 8, nil
+}
+
+func remainingMessageSize(length uint32) (int, error) {
+	if length < 4 {
+		return 0, fmt.Errorf("message length %d is too small", length)
+	}
+
+	if length > maxStartupLen {
+		return 0, fmt.Errorf("message length %d is too large", length)
+	}
+	return int(length) - 4, nil
+}
+
+func readMessage(r io.Reader) (typ byte, payload []byte, err error) {
+	header := make([]byte, 5)
+	if _, err := io.ReadFull(r, header); err != nil {
+		return 0, nil, err
+	}
+	typ = header[0]
+	n, err := remainingMessageSize(binary.BigEndian.Uint32(header[1:5]))
+	if err != nil {
+		return 0, nil, err
+	}
+	payload = make([]byte, n)
+	if n > 0 {
+		if _, err := io.ReadFull(r, payload); err != nil {
+			return 0, nil, err
+		}
+	}
+	return typ, payload, nil
+}
+
+func queryString(payload []byte) (string, error) {
+	if len(payload) == 0 || payload[len(payload)-1] != 0 {
+		return "", fmt.Errorf("query string: missing terminator")
+	}
+	return string(payload[:len(payload)-1]), nil
+}
+
+func errorResponsePayload(sqlstate, msg string) []byte {
+	buf := bytes.NewBuffer(make([]byte, 0, len(sqlstate)+len(msg)+3))
+	buf.WriteByte('S')
+	buf.WriteString("ERROR")
+	buf.WriteByte(0)
+	buf.WriteByte('C')
+	buf.WriteString(sqlstate)
+	buf.WriteByte(0)
+	buf.WriteByte('M')
+	buf.WriteString(msg)
+	buf.WriteByte(0)
+	buf.WriteByte(0)
+	return buf.Bytes()
 }
 
 func parseStartupHeader(b []byte) (length, version uint32, err error) {
@@ -154,6 +207,7 @@ func handleConn(ctx context.Context, log *slog.Logger, conn net.Conn) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	defer conn.Close()
+	defer log.Info("closed", "remote", conn.RemoteAddr().String())
 
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	go func() {
@@ -227,5 +281,49 @@ func handleConn(ctx context.Context, log *slog.Logger, conn net.Conn) {
 		return
 	}
 
-	log.Info("closed", "remote", conn.RemoteAddr().String())
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		log.Error("failed to clear read deadline", "error", err)
+		return
+	}
+
+	for {
+		typ, payload, err := readMessage(conn)
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			log.Error("failed to read message", "error", err)
+			return
+		}
+		switch typ {
+		case 'X':
+			return
+		case 'Q':
+			sql, err := queryString(payload)
+			if err != nil {
+				log.Error("failed to parse query", "error", err)
+				return
+			}
+			log.Info("query", "sql", sql)
+			if err := refuseQuery(conn); err != nil {
+				log.Error("failed to refuse query", "error", err)
+				return
+			}
+		default:
+			if err := refuseQuery(conn); err != nil {
+				log.Error("failed to refuse query", "error", err)
+				return
+			}
+		}
+	}
+}
+
+func refuseQuery(conn net.Conn) error {
+	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	if err := writeMessage(conn, 'E', errorResponsePayload("0A000", "query forwarding not implemented")); err != nil {
+		return err
+	}
+	return writeMessage(conn, 'Z', []byte{'I'})
 }

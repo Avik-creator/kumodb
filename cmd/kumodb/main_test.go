@@ -295,3 +295,191 @@ func TestWriteMessageReadyForQuery(t *testing.T) {
 		t.Fatalf("status %q, want I", got[5])
 	}
 }
+
+func TestRemainingMessageSize(t *testing.T) {
+	n, err := remainingMessageSize(13)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 9 {
+		t.Fatalf("n=%d, want 9", n)
+	}
+
+	n, err = remainingMessageSize(4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("n=%d, want 0", n)
+	}
+}
+
+func TestRemainingMessageSizeTooSmall(t *testing.T) {
+	if _, err := remainingMessageSize(3); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestRemainingMessageSizeTooLarge(t *testing.T) {
+	if _, err := remainingMessageSize(100_000_000); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestReadMessageQuery(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeMessage(&buf, 'Q', append([]byte("SELECT 1"), 0)); err != nil {
+		t.Fatal(err)
+	}
+	typ, payload, err := readMessage(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typ != 'Q' {
+		t.Fatalf("typ=%q, want Q", typ)
+	}
+	sql, err := queryString(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sql != "SELECT 1" {
+		t.Fatalf("sql=%q", sql)
+	}
+}
+
+func TestReadMessageTerminate(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeMessage(&buf, 'X', nil); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() != 5 {
+		t.Fatalf("len=%d, want 5", buf.Len())
+	}
+	typ, payload, err := readMessage(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typ != 'X' || len(payload) != 0 {
+		t.Fatalf("typ=%q payload=%x", typ, payload)
+	}
+}
+
+func TestQueryStringMissingTerminator(t *testing.T) {
+	if _, err := queryString([]byte("SELECT 1")); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestQueryStringEmpty(t *testing.T) {
+	sql, err := queryString([]byte{0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sql != "" {
+		t.Fatalf("sql=%q", sql)
+	}
+}
+
+func TestErrorResponsePayload(t *testing.T) {
+	got := errorResponsePayload("0A000", "query forwarding not implemented")
+	if got[0] != 'S' || got[len(got)-1] != 0 || got[len(got)-2] != 0 {
+		t.Fatalf("got %x", got)
+	}
+	if !bytes.Contains(got, []byte("ERROR")) || !bytes.Contains(got, []byte("0A000")) {
+		t.Fatalf("got %x", got)
+	}
+}
+
+func TestServeQueryGetsErrorThenReady(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- serve(ctx, testLogger(), ln)
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	ssl := make([]byte, 8)
+	binary.BigEndian.PutUint32(ssl[0:4], 8)
+	binary.BigEndian.PutUint32(ssl[4:8], sslRequestCode)
+	if _, err := conn.Write(ssl); err != nil {
+		t.Fatalf("write ssl: %v", err)
+	}
+
+	var reply [1]byte
+	if _, err := io.ReadFull(conn, reply[:]); err != nil {
+		t.Fatalf("read N: %v", err)
+	}
+	if reply[0] != 'N' {
+		t.Fatalf("ssl reply = %q, want N", reply[0])
+	}
+
+	startup := make([]byte, 8)
+	binary.BigEndian.PutUint32(startup[0:4], 8)
+	binary.BigEndian.PutUint32(startup[4:8], 196608)
+	if _, err := conn.Write(startup); err != nil {
+		t.Fatalf("write startup: %v", err)
+	}
+
+	authMsg := make([]byte, 9)
+	if _, err := io.ReadFull(conn, authMsg); err != nil {
+		t.Fatalf("auth: %v", err)
+	}
+	if authMsg[0] != 'R' || binary.BigEndian.Uint32(authMsg[5:9]) != 0 {
+		t.Fatalf("auth %x", authMsg)
+	}
+
+	ready := make([]byte, 6)
+	if _, err := io.ReadFull(conn, ready); err != nil {
+		t.Fatalf("ready: %v", err)
+	}
+	if ready[0] != 'Z' || ready[5] != 'I' {
+		t.Fatalf("ready %x", ready)
+	}
+
+	if err := writeMessage(conn, 'Q', append([]byte("SELECT 1"), 0)); err != nil {
+		t.Fatalf("write query: %v", err)
+	}
+
+	typ, payload, err := readMessage(conn)
+	if err != nil {
+		t.Fatalf("error response: %v", err)
+	}
+	if typ != 'E' || !bytes.Contains(payload, []byte("0A000")) {
+		t.Fatalf("typ=%q payload=%x", typ, payload)
+	}
+
+	typ, payload, err = readMessage(conn)
+	if err != nil {
+		t.Fatalf("ready after error: %v", err)
+	}
+	if typ != 'Z' || len(payload) != 1 || payload[0] != 'I' {
+		t.Fatalf("typ=%q payload=%x", typ, payload)
+	}
+
+	if err := writeMessage(conn, 'X', nil); err != nil {
+		t.Fatalf("write terminate: %v", err)
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve() error = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("serve did not return after cancel")
+	}
+}
