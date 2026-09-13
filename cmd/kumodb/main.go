@@ -133,7 +133,7 @@ func handleConn(ctx context.Context, log *slog.Logger, conn net.Conn) {
 			log.Error("failed to read startup bytes", "error", err)
 			return
 		}
-		log.Info("startup bytes", "bytes", string(body))
+		log.Info("startup bytes", "bytes", string(body[:remaining]))
 	}
 	log.Info("closed", "remote", conn.RemoteAddr().String())
 }
