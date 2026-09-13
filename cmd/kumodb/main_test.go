@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"io"
@@ -171,6 +172,22 @@ func TestServeRefusesSSLThenReadsStartup(t *testing.T) {
 		t.Fatalf("write startup: %v", err)
 	}
 
+	authMsg := make([]byte, 9)
+	if _, err := io.ReadFull(conn, authMsg); err != nil {
+		t.Fatalf("auth: %v", err)
+	}
+	if authMsg[0] != 'R' || binary.BigEndian.Uint32(authMsg[5:9]) != 0 {
+		t.Fatalf("auth %x", authMsg)
+	}
+
+	ready := make([]byte, 6)
+	if _, err := io.ReadFull(conn, ready); err != nil {
+		t.Fatalf("ready: %v", err)
+	}
+	if ready[0] != 'Z' || ready[5] != 'I' {
+		t.Fatalf("ready %x", ready)
+	}
+
 	cancel()
 
 	select {
@@ -239,5 +256,42 @@ func TestParseStartupParamsMissingTerminator(t *testing.T) {
 	// actually user\0avik\0 is: key, value, then rest empty → missing terminator
 	if _, err := parseStartupParams(body); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestWriteMessageAuthenticationOk(t *testing.T) {
+	var buf bytes.Buffer
+	auth := make([]byte, 4)
+	binary.BigEndian.PutUint32(auth, 0)
+	if err := writeMessage(&buf, 'R', auth); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.Bytes()
+	if len(got) != 9 || got[0] != 'R' {
+		t.Fatalf("got %x", got)
+	}
+	if binary.BigEndian.Uint32(got[1:5]) != 8 {
+		t.Fatalf("length field %d", binary.BigEndian.Uint32(got[1:5]))
+	}
+	if binary.BigEndian.Uint32(got[5:9]) != 0 {
+		t.Fatal("want auth code 0")
+	}
+
+}
+
+func TestWriteMessageReadyForQuery(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeMessage(&buf, 'Z', []byte{'I'}); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.Bytes()
+	if len(got) != 6 || got[0] != 'Z' {
+		t.Fatalf("got %x", got)
+	}
+	if binary.BigEndian.Uint32(got[1:5]) != 5 {
+		t.Fatalf("length field %d", binary.BigEndian.Uint32(got[1:5]))
+	}
+	if got[5] != 'I' {
+		t.Fatalf("status %q, want I", got[5])
 	}
 }

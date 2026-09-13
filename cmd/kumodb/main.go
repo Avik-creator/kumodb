@@ -55,6 +55,16 @@ func parseStartupParams(body []byte) (map[string]string, error) {
 	}
 }
 
+func writeMessage(w io.Writer, typ byte, payload []byte) error {
+	length := uint32(4 + len(payload))
+	buf := make([]byte, 1+int(length))
+	buf[0] = typ
+	binary.BigEndian.PutUint32(buf[1:5], length)
+	copy(buf[5:], payload)
+	_, err := w.Write(buf)
+	return err
+}
+
 func remainingStartupSize(length uint32) (int, error) {
 	if length < 8 {
 		return 0, fmt.Errorf("startup length %d is too small", length)
@@ -63,6 +73,28 @@ func remainingStartupSize(length uint32) (int, error) {
 		return 0, fmt.Errorf("startup length %d is too large", length)
 	}
 	return int(length) - 8, nil
+}
+
+func parseStartupHeader(b []byte) (length, version uint32, err error) {
+	if len(b) < 8 {
+		return 0, 0, fmt.Errorf("startup header too short: %d", len(b))
+	}
+	length = binary.BigEndian.Uint32(b[0:4])
+	version = binary.BigEndian.Uint32(b[4:8])
+	return length, version, nil
+}
+
+func readStartupHeader(conn net.Conn) (length, version uint32, err error) {
+	const headerLen = 8
+	header := make([]byte, headerLen)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return 0, 0, err
+	}
+	length, version, err = parseStartupHeader(header)
+	if err != nil {
+		return 0, 0, err
+	}
+	return length, version, nil
 }
 
 func main() {
@@ -170,7 +202,7 @@ func handleConn(ctx context.Context, log *slog.Logger, conn net.Conn) {
 			log.Error("failed to read startup bytes", "error", err)
 			return
 		}
-		log.Info("startup bytes", "bytes", int(remaining))
+		log.Info("startup bytes", "bytes", remaining)
 
 		params, err := parseStartupParams(body)
 		if err != nil {
@@ -180,27 +212,20 @@ func handleConn(ctx context.Context, log *slog.Logger, conn net.Conn) {
 		log.Info("startup params", "user", params["user"], "database", params["database"])
 	}
 
+	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		log.Error("failed to set write deadline", "error", err)
+		return
+	}
+	auth := make([]byte, 4)
+	binary.BigEndian.PutUint32(auth, 0)
+	if err := writeMessage(conn, 'R', auth); err != nil {
+		log.Error("failed to write auth message", "error", err)
+		return
+	}
+	if err := writeMessage(conn, 'Z', []byte{'I'}); err != nil {
+		log.Error("failed to write ready for query", "error", err)
+		return
+	}
+
 	log.Info("closed", "remote", conn.RemoteAddr().String())
-}
-
-func parseStartupHeader(b []byte) (length, version uint32, err error) {
-	if len(b) < 8 {
-		return 0, 0, fmt.Errorf("startup header too short: %d", len(b))
-	}
-	length = binary.BigEndian.Uint32(b[0:4])
-	version = binary.BigEndian.Uint32(b[4:8])
-	return length, version, nil
-}
-
-func readStartupHeader(conn net.Conn) (length, version uint32, err error) {
-	const headerLen = 8
-	header := make([]byte, headerLen)
-	if _, err := io.ReadFull(conn, header); err != nil {
-		return 0, 0, err
-	}
-	length, version, err = parseStartupHeader(header)
-	if err != nil {
-		return 0, 0, err
-	}
-	return length, version, nil
 }
